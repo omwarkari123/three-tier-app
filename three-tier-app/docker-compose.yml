@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  # TIER 3: DATABASE
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tasksdb
+      POSTGRES_USER: taskuser
+      POSTGRES_PASSWORD: taskpass
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskuser -d tasksdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # TIER 2: BACKEND API
+  backend:
+    build: ./backend
+    environment:
+      DB_HOST: db
+      DB_NAME: tasksdb
+      DB_USER: taskuser
+      DB_PASS: taskpass
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"   # exposed directly too, handy for API testing/debugging
+
+  # TIER 1: FRONTEND
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  db-data:
