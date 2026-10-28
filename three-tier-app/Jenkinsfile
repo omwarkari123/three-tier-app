@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -9,25 +10,30 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = 'ap-south-1'
+        AWS_REGION     = 'ap-south-1'
         AWS_ACCOUNT_ID = '070053416847'
-        ECR_REGISTRY = '070053416847.dkr.ecr.ap-south-1.amazonaws.com'
-        BACKEND_REPO = 'three-tier-app-backend'
-        FRONTEND_REPO = 'three-tier-app-frontend'
-        K8S_NAMESPACE = 'default'
+        ECR_REGISTRY   = '070053416847.dkr.ecr.ap-south-1.amazonaws.com'
+        BACKEND_REPO   = 'three-tier-app-backend'
+        FRONTEND_REPO  = 'three-tier-app-frontend'
+        K8S_NAMESPACE  = 'default'
     }
 
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
+
                 script {
                     env.IMAGE_TAG = sh(
                         script: 'git rev-parse --short=12 HEAD',
                         returnStdout: true
                     ).trim()
-                    env.BACKEND_IMAGE = "${env.ECR_REGISTRY}/${env.BACKEND_REPO}:${env.IMAGE_TAG}"
-                    env.FRONTEND_IMAGE = "${env.ECR_REGISTRY}/${env.FRONTEND_REPO}:${env.IMAGE_TAG}"
+
+                    env.BACKEND_IMAGE =
+                        "${env.ECR_REGISTRY}/${env.BACKEND_REPO}:${env.IMAGE_TAG}"
+
+                    env.FRONTEND_IMAGE =
+                        "${env.ECR_REGISTRY}/${env.FRONTEND_REPO}:${env.IMAGE_TAG}"
                 }
             }
         }
@@ -35,28 +41,35 @@ pipeline {
         stage('Validate Application') {
             steps {
                 dir('three-tier-app') {
-            sh '''
-                set -eu
-                python3 -m compileall -q backend
-                docker compose config -q
-            '''
+                    sh '''
+                        set -eu
+                        python3 -m compileall -q backend
+                        docker compose config -q
+                    '''
+                }
             }
         }
 
         stage('Build Images') {
             steps {
-                sh '''
-                    set -eu
-                    docker build --pull -t "$BACKEND_IMAGE" ./backend
-                    docker build --pull -t "$FRONTEND_IMAGE" ./frontend
-                '''
+                dir('three-tier-app') {
+                    sh '''
+                        set -eu
+                        docker build --pull -t "$BACKEND_IMAGE" ./backend
+                        docker build --pull -t "$FRONTEND_IMAGE" ./frontend
+                    '''
+                }
             }
         }
 
         stage('Publish Images to ECR') {
             when {
-                expression {
-                    env.BRANCH_NAME == 'main' || env.GIT_BRANCH == 'origin/main' || env.GIT_BRANCH == 'main'
+                anyOf {
+                    branch 'main'
+                    expression {
+                        env.GIT_BRANCH == 'origin/main' ||
+                        env.GIT_BRANCH == 'main'
+                    }
                 }
             }
             steps {
@@ -66,9 +79,14 @@ pipeline {
                 ]]) {
                     sh '''
                         set -eu
-                                                trap 'docker logout "$ECR_REGISTRY" >/dev/null 2>&1 || true' EXIT
-                        aws ecr get-login-password --region "$AWS_REGION" |
-                          docker login --username AWS --password-stdin "$ECR_REGISTRY"
+                        trap 'docker logout "$ECR_REGISTRY" >/dev/null 2>&1 || true' EXIT
+
+                        aws ecr get-login-password \
+                          --region "$AWS_REGION" |
+                          docker login \
+                            --username AWS \
+                            --password-stdin "$ECR_REGISTRY"
+
                         docker push "$BACKEND_IMAGE"
                         docker push "$FRONTEND_IMAGE"
                     '''
@@ -78,36 +96,66 @@ pipeline {
 
         stage('Deploy to Kubernetes') {
             when {
-                expression {
-                    env.BRANCH_NAME == 'main' || env.GIT_BRANCH == 'origin/main' || env.GIT_BRANCH == 'main'
+                anyOf {
+                    branch 'main'
+                    expression {
+                        env.GIT_BRANCH == 'origin/main' ||
+                        env.GIT_BRANCH == 'main'
+                    }
                 }
             }
             steps {
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-ecr-credentials'],
-                    file(credentialsId: 'kubernetes-kubeconfig', variable: 'KUBECONFIG')
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr-credentials'
+                    ],
+                    file(
+                        credentialsId: 'kubernetes-kubeconfig',
+                        variable: 'KUBECONFIG'
+                    )
                 ]) {
-                    sh '''
-                        set -eu
-                        deploy_dir=$(mktemp -d)
-                        trap 'rm -rf "$deploy_dir"' EXIT
+                    dir('three-tier-app') {
+                        sh '''
+                            set -eu
 
-                        sed "s|<YOUR_DOCKERHUB_USERNAME>/three-tier-backend:latest|$BACKEND_IMAGE|g" \
-                          k8s/backend.yaml > "$deploy_dir/backend.yaml"
-                        sed "s|<YOUR_DOCKERHUB_USERNAME>/three-tier-frontend:latest|$FRONTEND_IMAGE|g" \
-                          k8s/frontend.yaml > "$deploy_dir/frontend.yaml"
+                            command -v kubectl >/dev/null
+                            kubectl config current-context
 
-                        kubectl apply --namespace "$K8S_NAMESPACE" -f k8s/db.yaml
-                                                kubectl rollout status --namespace "$K8S_NAMESPACE" \
-                                                    deployment/db --timeout=180s
-                        kubectl apply --namespace "$K8S_NAMESPACE" -f "$deploy_dir/backend.yaml"
-                        kubectl apply --namespace "$K8S_NAMESPACE" -f "$deploy_dir/frontend.yaml"
+                            deploy_dir=$(mktemp -d)
+                            trap 'rm -rf "$deploy_dir"' EXIT
 
-                        kubectl rollout status --namespace "$K8S_NAMESPACE" \
-                          deployment/backend --timeout=180s
-                        kubectl rollout status --namespace "$K8S_NAMESPACE" \
-                          deployment/frontend --timeout=180s
-                    '''
+                            sed "s|<YOUR_DOCKERHUB_USERNAME>/three-tier-backend:latest|$BACKEND_IMAGE|g" \
+                              k8s/backend.yaml > "$deploy_dir/backend.yaml"
+
+                            sed "s|<YOUR_DOCKERHUB_USERNAME>/three-tier-frontend:latest|$FRONTEND_IMAGE|g" \
+                              k8s/frontend.yaml > "$deploy_dir/frontend.yaml"
+
+                            kubectl apply \
+                              --namespace "$K8S_NAMESPACE" \
+                              -f k8s/db.yaml
+
+                            kubectl rollout status \
+                              --namespace "$K8S_NAMESPACE" \
+                              deployment/db --timeout=180s
+
+                            kubectl apply \
+                              --namespace "$K8S_NAMESPACE" \
+                              -f "$deploy_dir/backend.yaml"
+
+                            kubectl apply \
+                              --namespace "$K8S_NAMESPACE" \
+                              -f "$deploy_dir/frontend.yaml"
+
+                            kubectl rollout status \
+                              --namespace "$K8S_NAMESPACE" \
+                              deployment/backend --timeout=180s
+
+                            kubectl rollout status \
+                              --namespace "$K8S_NAMESPACE" \
+                              deployment/frontend --timeout=180s
+                        '''
+                    }
                 }
             }
         }
